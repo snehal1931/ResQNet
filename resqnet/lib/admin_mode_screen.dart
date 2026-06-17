@@ -53,6 +53,7 @@ class _AdminModeScreenState extends State<AdminModeScreen> {
 
   @override
   void dispose() {
+    _meshService.stopSimulatorSync();
     _syncTimer?.cancel();
     super.dispose();
   }

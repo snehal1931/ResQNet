@@ -1,8 +1,11 @@
 from flask import Flask, request, jsonify
+from flask_cors import CORS
 import uuid
 import time
+import os
 
 app = Flask(__name__)
+CORS(app)
 
 # Simulated in-memory storage of nodes and messages
 nodes = {}
@@ -21,25 +24,29 @@ def register_node():
 @app.route('/broadcast', methods=['POST'])
 def broadcast_message():
     data = request.json
-    message_id = data.get('message_id')
-    new_status = data.get('status', 'PENDING')
+    message_id = data.get('message_id') or data.get('messageId')
     
     if not message_id:
         return jsonify({'status': 'error', 'message': 'Missing message_id'}), 400
         
     # Find if message exists to update it
-    existing_msg = next((m for m in message_store if m.get('message_id') == message_id), None)
+    existing_msg = next((m for m in message_store if (m.get('message_id') == message_id or m.get('messageId') == message_id)), None)
     
     if existing_msg:
-        if existing_msg.get('status') != new_status:
-            existing_msg['status'] = new_status
-            return jsonify({'status': 'updated', 'message_id': message_id, 'new_status': new_status})
-        return jsonify({'status': 'ignored', 'message': 'Message already seen with same status'})
+        changed = False
+        for k, v in data.items():
+            if existing_msg.get(k) != v:
+                existing_msg[k] = v
+                changed = True
+        if changed:
+            return jsonify({'status': 'updated', 'message_id': message_id})
+        return jsonify({'status': 'ignored', 'message': 'No changes detected'})
         
     messages.add(message_id)
     message_store.append(data)
     
     return jsonify({'status': 'broadcasted', 'message_id': message_id})
+
 
 @app.route('/sync', methods=['GET'])
 def sync_messages():
@@ -51,5 +58,6 @@ def sync_messages():
     return jsonify({'status': 'ok', 'messages': message_store})
 
 if __name__ == '__main__':
-    print("Starting ResQNet Mesh Simulator on port 5000...")
-    app.run(host='0.0.0.0', port=5000)
+    port = int(os.environ.get('PORT', 5000))
+    print(f"Starting ResQNet Mesh Simulator on port {port}...")
+    app.run(host='0.0.0.0', port=port)

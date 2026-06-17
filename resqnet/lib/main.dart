@@ -367,6 +367,7 @@ class _VictimModeScreenState extends State<VictimModeScreen>
 
   @override
   void dispose() {
+    _meshService.stopSimulatorSync();
     _pulseController.dispose();
     _contentController.dispose();
     super.dispose();
@@ -934,6 +935,7 @@ class _RescuerModeScreenState extends State<RescuerModeScreen> {
 
   @override
   void dispose() {
+    _meshService.stopSimulatorSync();
     _locationTimer?.cancel();
     _syncTimer?.cancel();
     super.dispose();
@@ -1784,17 +1786,22 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
   bool _isRecording = false;
   String? _currentlyPlayingId;
 
+  Function(ChatMessage)? _previousChatCallback;
+
   @override
   void initState() {
     super.initState();
     _loadMessages();
+    _previousChatCallback = widget.meshService.onChatReceived;
     widget.meshService.onChatReceived = (msg) {
       if (msg.sosId == widget.sosId) _loadMessages();
+      if (_previousChatCallback != null) _previousChatCallback!(msg);
     };
   }
 
   @override
   void dispose() {
+    widget.meshService.onChatReceived = _previousChatCallback;
     _audioRecorder.dispose();
     _audioPlayer.dispose();
     super.dispose();

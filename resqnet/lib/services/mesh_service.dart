@@ -1,4 +1,6 @@
 import 'dart:convert';
+import 'dart:async';
+import 'package:http/http.dart' as http;
 import 'package:geolocator/geolocator.dart';
 import 'package:flutter/foundation.dart';
 import 'package:nearby_connections/nearby_connections.dart';
@@ -26,7 +28,11 @@ class MeshService {
   // Maps filePayloadId to temporary local path
   final Map<int, String> _incomingFiles = {};
 
-  MeshService(this.nodeId);
+  Timer? _simulatorTimer;
+
+  MeshService(this.nodeId) {
+    startSimulatorSync();
+  }
 
   bool get _isSupported {
     return !kIsWeb &&
@@ -400,6 +406,7 @@ class MeshService {
     String? excludeEndpoint,
   }) async {
     _relayToPeers(message, excludeEndpoint: excludeEndpoint);
+    await _broadcastToSimulator(message.toMap());
   }
 
   void _relayToPeers(SosMessage message, {String? excludeEndpoint}) {
@@ -439,6 +446,7 @@ class MeshService {
   Future<void> sendChatMessage(ChatMessage chatMessage) async {
     await dbHelper.insertChatMessage(chatMessage);
     _relayChatToPeers(chatMessage);
+    await _broadcastToSimulator(chatMessage.toMap());
   }
 
   void _relayChatToPeers(ChatMessage message, {String? excludeEndpoint}) {
@@ -452,5 +460,152 @@ class MeshService {
         Nearby().sendBytesPayload(endpointId, payloadBytes);
       }
     }
+  }
+
+  // HTTP Mesh Simulator Sync Fallback Implementation
+
+  // ============================================================
+  // UPDATE THIS for cloud/Render deployment
+  // Set `_cloudSimulatorUrl` to your public Render URL (e.g., "https://resqnet-mesh.onrender.com")
+  // If empty, it will fall back to local Wi-Fi testing using `_simulatorHost`.
+  // ============================================================
+  static const String _cloudSimulatorUrl = ""; 
+  static const String _simulatorHost = "192.168.1.53";
+  static const int _simulatorPort = 5000;
+
+  String get _simulatorBaseUrl {
+    if (_cloudSimulatorUrl.isNotEmpty) {
+      return _cloudSimulatorUrl.endsWith("/") 
+          ? _cloudSimulatorUrl.substring(0, _cloudSimulatorUrl.length - 1)
+          : _cloudSimulatorUrl;
+    }
+    if (kIsWeb) {
+      return "http://localhost:$_simulatorPort";
+    }
+    if (defaultTargetPlatform == TargetPlatform.android) {
+      // Use LAN IP for physical devices; for emulator use 10.0.2.2
+      return "http://$_simulatorHost:$_simulatorPort";
+    }
+    return "http://localhost:$_simulatorPort";
+  }
+
+  void startSimulatorSync() {
+    if (_simulatorTimer != null) return;
+    _registerNodeWithSimulator();
+    _simulatorTimer = Timer.periodic(const Duration(seconds: 3), (timer) async {
+      await _syncWithSimulator();
+    });
+  }
+
+  void stopSimulatorSync() {
+    _simulatorTimer?.cancel();
+    _simulatorTimer = null;
+  }
+
+  Future<void> _registerNodeWithSimulator() async {
+    try {
+      final response = await http.post(
+        Uri.parse("$_simulatorBaseUrl/register"),
+        headers: {"Content-Type": "application/json"},
+        body: jsonEncode({"node_id": nodeId}),
+      );
+      if (response.statusCode == 200) {
+        print("MeshService: Registered with simulator as $nodeId");
+      }
+    } catch (e) {
+      print("MeshService: Failed to register with simulator: $e");
+    }
+  }
+
+  Future<void> _syncWithSimulator() async {
+    try {
+      final response = await http.get(
+        Uri.parse("$_simulatorBaseUrl/sync?node_id=$nodeId"),
+      );
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        final List<dynamic> msgs = data['messages'] ?? [];
+        
+        for (var item in msgs) {
+          final Map<String, dynamic> msgMap = Map<String, dynamic>.from(item);
+          
+          if (msgMap.containsKey('sosId')) {
+            // Chat Message
+            final chatMsg = ChatMessage.fromMap(msgMap, nodeId);
+            final chatMsgs = await dbHelper.getChatMessages(chatMsg.sosId, nodeId);
+            bool chatExists = chatMsgs.any((c) => c.messageId == chatMsg.messageId);
+            if (!chatExists) {
+              await dbHelper.insertChatMessage(chatMsg);
+              if (onChatReceived != null) onChatReceived!(chatMsg);
+            }
+          } else if (msgMap.containsKey('messageId') || msgMap.containsKey('message_id')) {
+            // SOS Message
+            final normalizedMap = _normalizeSosMessageMap(msgMap);
+            final msg = SosMessage.fromMap(normalizedMap);
+            
+            bool exists = await dbHelper.messageExists(msg.messageId);
+            if (!exists) {
+              await dbHelper.insertMessage(msg);
+              if (onMessageReceived != null) onMessageReceived!(msg);
+            } else {
+              final existingMsgs = await dbHelper.getMessages();
+              final localMsg = existingMsgs.firstWhere((m) => m.messageId == msg.messageId);
+              
+              if (localMsg.status != msg.status || 
+                  localMsg.rescuerLatitude != msg.rescuerLatitude ||
+                  localMsg.rescuerLongitude != msg.rescuerLongitude) {
+                await dbHelper.insertMessage(msg);
+                if (onMessageReceived != null) onMessageReceived!(msg);
+              }
+            }
+          }
+        }
+      }
+    } catch (e) {
+      // Failed to sync (simulator might be offline, ignore)
+    }
+  }
+
+  Future<void> _broadcastToSimulator(Map<String, dynamic> data) async {
+    try {
+      final payload = Map<String, dynamic>.from(data);
+      if (payload.containsKey('messageId')) {
+        payload['message_id'] = payload['messageId'];
+      }
+      
+      final response = await http.post(
+        Uri.parse("$_simulatorBaseUrl/broadcast"),
+        headers: {"Content-Type": "application/json"},
+        body: jsonEncode(payload),
+      );
+      if (response.statusCode != 200) {
+        print("MeshService: Simulator broadcast returned ${response.statusCode}");
+      }
+    } catch (e) {
+      print("MeshService: Failed to broadcast to simulator: $e");
+    }
+  }
+
+  Map<String, dynamic> _normalizeSosMessageMap(Map<String, dynamic> map) {
+    final result = <String, dynamic>{};
+    map.forEach((key, value) {
+      if (key == 'message_id') {
+        result['messageId'] = value;
+      } else if (key == 'sender_id') {
+        result['senderId'] = value;
+      } else if (key == 'hop_count') {
+        result['hopCount'] = value;
+      } else if (key == 'rescuer_latitude') {
+        result['rescuerLatitude'] = value;
+      } else if (key == 'rescuer_longitude') {
+        result['rescuerLongitude'] = value;
+      } else {
+        result[key] = value;
+      }
+    });
+    if (!result.containsKey('messageId') && map.containsKey('messageId')) {
+      result['messageId'] = map['messageId'];
+    }
+    return result;
   }
 }
