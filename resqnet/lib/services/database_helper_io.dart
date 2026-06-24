@@ -20,7 +20,7 @@ class DatabaseHelper {
     String path = join(await getDatabasesPath(), 'resqnet.db');
     return await openDatabase(
       path,
-      version: 7,
+      version: 8,
       onCreate: _onCreate,
       onUpgrade: _onUpgrade,
     );
@@ -40,7 +40,12 @@ class DatabaseHelper {
         latitude REAL,
         longitude REAL,
         rescuerLatitude REAL,
-        rescuerLongitude REAL
+        rescuerLongitude REAL,
+        disasterType TEXT,
+        injurySeverity TEXT,
+        priorityScore REAL,
+        priorityExplanation TEXT,
+        confidenceScore REAL
       )
     ''');
     await db.execute('''
@@ -86,6 +91,13 @@ class DatabaseHelper {
     }
     if (oldVersion < 7) {
       await db.execute("ALTER TABLE chat_messages ADD COLUMN audioPath TEXT;");
+    }
+    if (oldVersion < 8) {
+      await db.execute("ALTER TABLE messages ADD COLUMN disasterType TEXT DEFAULT 'Other';");
+      await db.execute("ALTER TABLE messages ADD COLUMN injurySeverity TEXT DEFAULT 'Low';");
+      await db.execute("ALTER TABLE messages ADD COLUMN priorityScore REAL DEFAULT 0.0;");
+      await db.execute("ALTER TABLE messages ADD COLUMN priorityExplanation TEXT DEFAULT '[]';");
+      await db.execute("ALTER TABLE messages ADD COLUMN confidenceScore REAL DEFAULT 0.0;");
     }
   }
 
