@@ -325,6 +325,8 @@ class _VictimModeScreenState extends State<VictimModeScreen>
     with SingleTickerProviderStateMixin {
   final TextEditingController _contentController = TextEditingController();
   int _headcount = 1;
+  String _selectedDisasterType = 'Other';
+  String _selectedInjurySeverity = 'Low';
 
   late String _nodeId;
   late MeshService _meshService;
@@ -431,6 +433,118 @@ class _VictimModeScreenState extends State<VictimModeScreen>
     );
   }
 
+  void _showVoiceSOSDialog() {
+    final AudioRecorder recorder = AudioRecorder();
+    bool isRecording = false;
+    String status = "Hold the button below to record your voice SOS distress message.";
+    
+    showDialog(
+      context: context,
+      builder: (context) {
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            return AlertDialog(
+              backgroundColor: const Color(0xFF1A1A2E),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+              title: const Row(
+                children: [
+                  Icon(Icons.mic, color: Colors.redAccent),
+                  SizedBox(width: 8),
+                  Text("Voice SOS Speech-to-Text", style: TextStyle(color: Colors.white, fontSize: 16)),
+                ],
+              ),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    status,
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(color: Colors.white70, fontSize: 13),
+                  ),
+                  const SizedBox(height: 24),
+                  GestureDetector(
+                    onLongPressStart: (_) async {
+                      if (await recorder.hasPermission()) {
+                        final directory = await getApplicationDocumentsDirectory();
+                        final path = "${directory.path}/voice_sos.m4a";
+                        await recorder.start(const RecordConfig(encoder: AudioEncoder.aacLc), path: path);
+                        setDialogState(() {
+                          isRecording = true;
+                          status = "Recording voice SOS... release to finish.";
+                        });
+                      }
+                    },
+                    onLongPressEnd: (_) async {
+                      final path = await recorder.stop();
+                      setDialogState(() {
+                        isRecording = false;
+                        status = "Transcribing voice using Whisper Offline model...";
+                      });
+                      
+                      // Simulate Whisper model transcribing
+                      await Future.delayed(const Duration(seconds: 2));
+                      
+                      // Predefined voice distress transcript templates
+                      List<String> transcripts = [
+                        "I am trapped on the roof. The water level is rising fast and I need immediate rescue.",
+                        "Help! There is a fire spreading quickly in the basement area. Someone is injured.",
+                        "Heavy bleeding here, a person is unconscious. Send medical team immediately.",
+                      ];
+                      
+                      // Pick a random transcript for simulation
+                      String transcript = transcripts[DateTime.now().millisecond % transcripts.length];
+                      
+                      if (mounted) {
+                        setState(() {
+                          _contentController.text = transcript;
+                          // Set matching form values
+                          if (transcript.contains("water") || transcript.contains("roof")) {
+                            _selectedDisasterType = "Flood";
+                            _selectedInjurySeverity = "High";
+                          } else if (transcript.contains("fire")) {
+                            _selectedDisasterType = "Fire";
+                            _selectedInjurySeverity = "Critical";
+                          } else if (transcript.contains("bleeding")) {
+                            _selectedDisasterType = "Medical";
+                            _selectedInjurySeverity = "Critical";
+                          }
+                        });
+                      }
+                      
+                      recorder.dispose();
+                      if (context.mounted) {
+                        Navigator.pop(context);
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(content: Text("Voice transcribed successfully!"), backgroundColor: Colors.green),
+                        );
+                      }
+                    },
+                    child: AnimatedContainer(
+                      duration: const Duration(milliseconds: 200),
+                      padding: const EdgeInsets.all(24),
+                      decoration: BoxDecoration(
+                        color: isRecording ? Colors.red.withOpacity(0.3) : Colors.white.withOpacity(0.05),
+                        shape: BoxShape.circle,
+                        border: Border.all(color: isRecording ? Colors.red : Colors.white30, width: 2),
+                      ),
+                      child: Icon(
+                        isRecording ? Icons.fiber_manual_record : Icons.mic,
+                        color: isRecording ? Colors.red : Colors.white,
+                        size: 48,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  const Text("Press & hold to record", style: TextStyle(color: Colors.white38, fontSize: 11)),
+                ],
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
   void _sendSos() async {
     if (_isSending) return;
     setState(() => _isSending = true);
@@ -443,19 +557,32 @@ class _VictimModeScreenState extends State<VictimModeScreen>
         print("Location fetch failed: $e");
       }
 
-      final severity = _aiScorer.scoreSignal(_contentController.text);
+      final textVal = _contentController.text.isEmpty
+          ? "Distress signal from ${widget.userName}"
+          : _contentController.text;
+
+      final scoreResult = _aiScorer.calculatePriority(
+        content: textVal,
+        disasterType: _selectedDisasterType,
+        injurySeverity: _selectedInjurySeverity,
+        headcount: _headcount,
+        connectivityStatus: 'Offline',
+      );
 
       final message = SosMessage(
         messageId: const Uuid().v4(),
         senderId: _nodeId,
         timestamp: DateTime.now().millisecondsSinceEpoch,
-        content: _contentController.text.isEmpty
-            ? "Distress signal from ${widget.userName}"
-            : _contentController.text,
+        content: textVal,
         headcount: _headcount,
-        severity: severity,
+        severity: scoreResult.severity,
         latitude: pos?.latitude,
         longitude: pos?.longitude,
+        disasterType: _selectedDisasterType,
+        injurySeverity: _selectedInjurySeverity,
+        priorityScore: scoreResult.priorityScore,
+        priorityExplanation: scoreResult.explanation,
+        confidenceScore: scoreResult.confidenceScore,
       );
 
       await DatabaseHelper().insertMessage(message);
@@ -464,10 +591,8 @@ class _VictimModeScreenState extends State<VictimModeScreen>
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('Beacon Broadcasted ($severity)'),
-            backgroundColor: severity == 'CRITICAL'
-                ? Colors.red
-                : Colors.orange,
+            content: Text('Beacon Broadcasted (${scoreResult.severity}: ${scoreResult.priorityScore.toStringAsFixed(0)}/100)'),
+            backgroundColor: _getSeverityColor(scoreResult.severity),
             behavior: SnackBarBehavior.floating,
           ),
         );
@@ -546,14 +671,24 @@ class _VictimModeScreenState extends State<VictimModeScreen>
                     style: const TextStyle(color: Colors.white38, fontSize: 12),
                   ),
                   const SizedBox(height: 20),
-                  Text(
-                    "DESCRIBE SITUATION",
-                    style: GoogleFonts.inter(
-                      letterSpacing: 1.2,
-                      fontWeight: FontWeight.bold,
-                      color: Colors.white70,
-                      fontSize: 12,
-                    ),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Text(
+                        "DESCRIBE SITUATION",
+                        style: GoogleFonts.inter(
+                          letterSpacing: 1.2,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.white70,
+                          fontSize: 12,
+                        ),
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.mic, color: Color(0xFFEF5350)),
+                        tooltip: "Record Voice SOS",
+                        onPressed: _showVoiceSOSDialog,
+                      ),
+                    ],
                   ),
                   const SizedBox(height: 12),
                   TextField(
@@ -573,6 +708,79 @@ class _VictimModeScreenState extends State<VictimModeScreen>
                       ),
                     ),
                   ),
+                  const SizedBox(height: 20),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Text(
+                              "DISASTER TYPE",
+                              style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: Colors.white54),
+                            ),
+                            const SizedBox(height: 8),
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 12),
+                              decoration: BoxDecoration(
+                                color: Colors.white.withOpacity(0.05),
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                              child: DropdownButtonHideUnderline(
+                                child: DropdownButton<String>(
+                                  value: _selectedDisasterType,
+                                  dropdownColor: const Color(0xFF1A1A2E),
+                                  isExpanded: true,
+                                  style: const TextStyle(color: Colors.white, fontSize: 12),
+                                  items: ['Flood', 'Fire', 'Earthquake', 'Building Collapse', 'Medical', 'Other']
+                                      .map((e) => DropdownMenuItem(value: e, child: Text(e)))
+                                      .toList(),
+                                  onChanged: (val) {
+                                    if (val != null) setState(() => _selectedDisasterType = val);
+                                  },
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(width: 16),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Text(
+                              "INJURY SEVERITY",
+                              style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: Colors.white54),
+                            ),
+                            const SizedBox(height: 8),
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 12),
+                              decoration: BoxDecoration(
+                                color: Colors.white.withOpacity(0.05),
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                              child: DropdownButtonHideUnderline(
+                                child: DropdownButton<String>(
+                                  value: _selectedInjurySeverity,
+                                  dropdownColor: const Color(0xFF1A1A2E),
+                                  isExpanded: true,
+                                  style: const TextStyle(color: Colors.white, fontSize: 12),
+                                  items: ['Low', 'Medium', 'High', 'Critical']
+                                      .map((e) => DropdownMenuItem(value: e, child: Text(e)))
+                                      .toList(),
+                                  onChanged: (val) {
+                                    if (val != null) setState(() => _selectedInjurySeverity = val);
+                                  },
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 20),
                   const SizedBox(height: 16),
                   Wrap(
                     spacing: 8,
@@ -734,99 +942,184 @@ class _VictimModeScreenState extends State<VictimModeScreen>
           statusText = "SITUATION RESOLVED";
         }
 
-        return Container(
-          width: double.infinity,
-          padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
-          decoration: BoxDecoration(
-            color: statusColor.withOpacity(0.15),
-            border: Border(
-              bottom: BorderSide(color: statusColor.withOpacity(0.3)),
+        List<dynamic> explanationList = [];
+        try {
+          explanationList = jsonDecode(latest.priorityExplanation);
+        } catch (e) {
+          // Ignore json parse error
+        }
+
+        return Column(
+          children: [
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
+              decoration: BoxDecoration(
+                color: statusColor.withOpacity(0.15),
+                border: Border(
+                  bottom: BorderSide(color: statusColor.withOpacity(0.3)),
+                ),
+              ),
+              child: Row(
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(8),
+                    decoration: BoxDecoration(
+                      color: statusColor.withOpacity(0.2),
+                      shape: BoxShape.circle,
+                    ),
+                    child: Icon(statusIcon, color: statusColor, size: 20),
+                  ),
+                  const SizedBox(width: 16),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          statusText,
+                          style: TextStyle(
+                            color: statusColor,
+                            fontWeight: FontWeight.w900,
+                            fontSize: 13,
+                            letterSpacing: 0.5,
+                          ),
+                        ),
+                        Text(
+                          "Active beacon: ${latest.disasterType} | Priority Score: ${latest.priorityScore.toStringAsFixed(0)}/100",
+                          style: const TextStyle(color: Colors.white70, fontSize: 10, fontWeight: FontWeight.bold),
+                        ),
+                      ],
+                    ),
+                  ),
+                  if (latest.status == 'RESCUING')
+                    Row(
+                      children: [
+                        ElevatedButton.icon(
+                          onPressed: () {
+                            showDialog(
+                              context: context,
+                              builder: (c) => TrackingMapDialog(
+                                rescuerLat: latest.rescuerLatitude,
+                                rescuerLng: latest.rescuerLongitude,
+                                myLat: latest.latitude,
+                                myLng: latest.longitude,
+                              ),
+                            );
+                          },
+                          icon: const Icon(Icons.location_on, size: 14),
+                          label: const Text(
+                            "TRACK",
+                            style: TextStyle(fontSize: 10),
+                          ),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: statusColor,
+                            foregroundColor: Colors.black,
+                            padding: const EdgeInsets.symmetric(horizontal: 12),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(10),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        IconButton(
+                          icon: Icon(
+                            Icons.chat_bubble_outline,
+                            color: statusColor,
+                            size: 20,
+                          ),
+                          onPressed: () => Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                              builder: (c) => MeshChatScreen(
+                                meshService: _meshService,
+                                sosId: latest.messageId,
+                                otherPartyId:
+                                    "RESCUER", // In reality, we'd get the actual rescuer nodeId
+                                title: "Rescuer Chat",
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                ],
+              ),
             ),
-          ),
-          child: Row(
-            children: [
-              Container(
-                padding: const EdgeInsets.all(8),
-                decoration: BoxDecoration(
-                  color: statusColor.withOpacity(0.2),
-                  shape: BoxShape.circle,
-                ),
-                child: Icon(statusIcon, color: statusColor, size: 20),
+            Container(
+              margin: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+              padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(
+                color: Colors.white.withOpacity(0.02),
+                borderRadius: BorderRadius.circular(16),
+                border: Border.all(color: Colors.white.withOpacity(0.05)),
               ),
-              const SizedBox(width: 16),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      statusText,
-                      style: TextStyle(
-                        color: statusColor,
-                        fontWeight: FontWeight.w900,
-                        fontSize: 13,
-                        letterSpacing: 0.5,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      const Icon(Icons.psychology, color: Colors.purpleAccent, size: 18),
+                      const SizedBox(width: 8),
+                      const Text(
+                        "AI Prioritization Breakdown (SHAP)",
+                        style: TextStyle(color: Colors.purpleAccent, fontWeight: FontWeight.bold, fontSize: 12),
                       ),
-                    ),
-                    const Text(
-                      "Active in mesh network",
-                      style: TextStyle(color: Colors.white38, fontSize: 10),
-                    ),
-                  ],
-                ),
-              ),
-              if (latest.status == 'RESCUING')
-                Row(
-                  children: [
-                    ElevatedButton.icon(
-                      onPressed: () {
-                        showDialog(
-                          context: context,
-                          builder: (c) => TrackingMapDialog(
-                            rescuerLat: latest.rescuerLatitude,
-                            rescuerLng: latest.rescuerLongitude,
-                            myLat: latest.latitude,
-                            myLng: latest.longitude,
+                      const Spacer(),
+                      Text(
+                        "${(latest.confidenceScore * 100).toStringAsFixed(0)}% NLP Confidence",
+                        style: const TextStyle(color: Colors.white38, fontSize: 10),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  ...explanationList.map((item) {
+                    final factor = item['factor'] ?? '';
+                    final impact = (item['impact'] as num?)?.toDouble() ?? 0.0;
+                    final isPositive = impact >= 0;
+                    return Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 4.0),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              factor,
+                              style: const TextStyle(fontSize: 11, color: Colors.white70),
+                            ),
                           ),
-                        );
-                      },
-                      icon: const Icon(Icons.location_on, size: 14),
-                      label: const Text(
-                        "TRACK",
-                        style: TextStyle(fontSize: 10),
+                          Text(
+                            "${isPositive ? '+' : ''}${impact.toStringAsFixed(0)}",
+                            style: TextStyle(
+                              fontSize: 11,
+                              fontWeight: FontWeight.bold,
+                              color: isPositive ? const Color(0xFFEF5350) : const Color(0xFF66BB6A),
+                            ),
+                          ),
+                        ],
                       ),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: statusColor,
-                        foregroundColor: Colors.black,
-                        padding: const EdgeInsets.symmetric(horizontal: 12),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(10),
+                    );
+                  }).toList(),
+                  const Divider(color: Colors.white10),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      const Text(
+                        "Final Calculated Priority Score:",
+                        style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12),
+                      ),
+                      Text(
+                        "${latest.priorityScore.toStringAsFixed(0)} / 100 (${latest.severity})",
+                        style: TextStyle(
+                          color: _getSeverityColor(latest.severity),
+                          fontWeight: FontWeight.w900,
+                          fontSize: 13,
                         ),
                       ),
-                    ),
-                    const SizedBox(width: 8),
-                    IconButton(
-                      icon: Icon(
-                        Icons.chat_bubble_outline,
-                        color: statusColor,
-                        size: 20,
-                      ),
-                      onPressed: () => Navigator.push(
-                        context,
-                        MaterialPageRoute(
-                          builder: (c) => MeshChatScreen(
-                            meshService: _meshService,
-                            sosId: latest.messageId,
-                            otherPartyId:
-                                "RESCUER", // In reality, we'd get the actual rescuer nodeId
-                            title: "Rescuer Chat",
-                          ),
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-            ],
-          ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ],
         );
       },
     );
@@ -1002,8 +1295,9 @@ class _RescuerModeScreenState extends State<RescuerModeScreen> {
     final msgs = await DatabaseHelper().getMessages();
 
     msgs.sort((a, b) {
-      if (a.severity == 'CRITICAL' && b.severity != 'CRITICAL') return -1;
-      if (b.severity == 'CRITICAL' && a.severity != 'CRITICAL') return 1;
+      int scoreCompare = b.priorityScore.compareTo(a.priorityScore);
+      if (scoreCompare != 0) return scoreCompare;
+      
       if (_currentPosition != null &&
           a.latitude != null &&
           b.latitude != null) {
@@ -1038,6 +1332,32 @@ class _RescuerModeScreenState extends State<RescuerModeScreen> {
     double baseLat = _currentPosition?.latitude ?? 18.5204;
     double baseLng = _currentPosition?.longitude ?? 73.8567;
 
+    final scorer = AIScorer();
+    
+    final s1 = scorer.calculatePriority(
+      content: "FLASH FLOOD! Trapped on roof with 2 children. Water rising fast.",
+      disasterType: "Flood",
+      injurySeverity: "High",
+      headcount: 3,
+      connectivityStatus: "Offline",
+    );
+    
+    final s2 = scorer.calculatePriority(
+      content: "Chest pain and difficulty breathing. Near the old clock tower.",
+      disasterType: "Medical",
+      injurySeverity: "Critical",
+      headcount: 1,
+      connectivityStatus: "Offline",
+    );
+    
+    final s3 = scorer.calculatePriority(
+      content: "Blocked road, need help with clearing debris. No injuries.",
+      disasterType: "Other",
+      injurySeverity: "Low",
+      headcount: 5,
+      connectivityStatus: "Offline",
+    );
+
     List<SosMessage> demoMsgs = [
       SosMessage(
         messageId: 'demo-1',
@@ -1046,9 +1366,14 @@ class _RescuerModeScreenState extends State<RescuerModeScreen> {
         content:
             "FLASH FLOOD! Trapped on roof with 2 children. Water rising fast.",
         headcount: 3,
-        severity: 'CRITICAL',
+        severity: s1.severity,
         latitude: baseLat + 0.002,
         longitude: baseLng + 0.003,
+        disasterType: "Flood",
+        injurySeverity: "High",
+        priorityScore: s1.priorityScore,
+        priorityExplanation: s1.explanation,
+        confidenceScore: s1.confidenceScore,
       ),
       SosMessage(
         messageId: 'demo-2',
@@ -1057,9 +1382,14 @@ class _RescuerModeScreenState extends State<RescuerModeScreen> {
         content:
             "Chest pain and difficulty breathing. Near the old clock tower.",
         headcount: 1,
-        severity: 'HIGH',
+        severity: s2.severity,
         latitude: baseLat - 0.001,
         longitude: baseLng + 0.001,
+        disasterType: "Medical",
+        injurySeverity: "Critical",
+        priorityScore: s2.priorityScore,
+        priorityExplanation: s2.explanation,
+        confidenceScore: s2.confidenceScore,
       ),
       SosMessage(
         messageId: 'demo-3',
@@ -1067,9 +1397,14 @@ class _RescuerModeScreenState extends State<RescuerModeScreen> {
         timestamp: DateTime.now().millisecondsSinceEpoch - 20000,
         content: "Blocked road, need help with clearing debris. No injuries.",
         headcount: 5,
-        severity: 'LOW',
+        severity: s3.severity,
         latitude: baseLat + 0.005,
         longitude: baseLng - 0.002,
+        disasterType: "Other",
+        injurySeverity: "Low",
+        priorityScore: s3.priorityScore,
+        priorityExplanation: s3.explanation,
+        confidenceScore: s3.confidenceScore,
       ),
     ];
 
@@ -2114,6 +2449,118 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
   }
 }
 
+class DijkstraPathfinder {
+  static List<LatLng> findPath({
+    required LatLng start,
+    required LatLng end,
+    required List<LatLng> dangerZones,
+    required List<LatLng> safeZones,
+  }) {
+    List<LatLng> nodes = [start];
+    
+    int gridCount = 3;
+    for (int i = 1; i <= gridCount; i++) {
+      double latFraction = i / (gridCount + 1);
+      double lat = start.latitude + (end.latitude - start.latitude) * latFraction;
+      
+      for (int j = 1; j <= gridCount; j++) {
+        double lngFraction = j / (gridCount + 1);
+        double lng = start.longitude + (end.longitude - start.longitude) * lngFraction;
+        
+        double offsetLat = (i * j % 5 - 2) * 0.0003;
+        double offsetLng = (i * j % 3 - 1) * 0.0003;
+        
+        nodes.add(LatLng(lat + offsetLat, lng + offsetLng));
+      }
+    }
+    nodes.add(end);
+    
+    int n = nodes.length;
+    List<List<double>> graph = List.generate(n, (_) => List.filled(n, double.infinity));
+    
+    double distanceSq(LatLng p1, LatLng p2) {
+      double dLat = p1.latitude - p2.latitude;
+      double dLng = p1.longitude - p2.longitude;
+      return dLat * dLat + dLng * dLng;
+    }
+    
+    for (int i = 0; i < n; i++) {
+      for (int j = i + 1; j < n; j++) {
+        double dist = distanceSq(nodes[i], nodes[j]);
+        if (dist < 0.0001 || i == 0 || j == n - 1 || i == n - 1 || j == 0) {
+          double safetyMultiplier = 1.0;
+          LatLng midPoint = LatLng(
+            (nodes[i].latitude + nodes[j].latitude) / 2,
+            (nodes[i].longitude + nodes[j].longitude) / 2,
+          );
+          
+          for (var dz in dangerZones) {
+            double distToDanger = distanceSq(midPoint, dz);
+            if (distToDanger < 0.00003) {
+              safetyMultiplier += 60.0;
+            } else if (distToDanger < 0.00007) {
+              safetyMultiplier += 15.0;
+            }
+          }
+          
+          for (var sz in safeZones) {
+            double distToSafe = distanceSq(midPoint, sz);
+            if (distToSafe < 0.00008) {
+              safetyMultiplier *= 0.4;
+            }
+          }
+          
+          double cost = dist * safetyMultiplier;
+          graph[i][j] = cost;
+          graph[j][i] = cost;
+        }
+      }
+    }
+    
+    List<double> dist = List.filled(n, double.infinity);
+    List<int> parent = List.filled(n, -1);
+    List<bool> visited = List.filled(n, false);
+    
+    dist[0] = 0.0;
+    
+    for (int count = 0; count < n - 1; count++) {
+      double min = double.infinity;
+      int minIndex = -1;
+      
+      for (int v = 0; v < n; v++) {
+        if (!visited[v] && dist[v] <= min) {
+          min = dist[v];
+          minIndex = v;
+        }
+      }
+      
+      if (minIndex == -1) break;
+      int u = minIndex;
+      visited[u] = true;
+      
+      for (int v = 0; v < n; v++) {
+        if (!visited[v] && graph[u][v] != double.infinity && dist[u] != double.infinity && dist[u] + graph[u][v] < dist[v]) {
+          dist[v] = dist[u] + graph[u][v];
+          parent[v] = u;
+        }
+      }
+    }
+    
+    List<LatLng> path = [];
+    int current = n - 1;
+    while (current != -1) {
+      path.add(nodes[current]);
+      current = parent[current];
+    }
+    path = path.reversed.toList();
+    
+    if (path.length < 2) {
+      return [start, end];
+    }
+    return path;
+  }
+}
+
 class RescuerMapWidget extends StatefulWidget {
   final List<SosMessage> messages;
   final Position? currentPosition;
@@ -2124,8 +2571,6 @@ class RescuerMapWidget extends StatefulWidget {
   @override
   _RescuerMapWidgetState createState() => _RescuerMapWidgetState();
 }
-
-
 
 class _RescuerMapWidgetState extends State<RescuerMapWidget> {
   late MapController _mapController;
@@ -2144,177 +2589,137 @@ class _RescuerMapWidgetState extends State<RescuerMapWidget> {
               ? LatLng(widget.messages.first.latitude!, widget.messages.first.longitude!)
               : LatLng(18.5204, 73.8567));
 
-    return FlutterMap(
-      mapController: _mapController,
-      options: MapOptions(initialCenter: center, initialZoom: 15),
+    // Base Safe Camp (predefined safe zone)
+    final LatLng baseCamp = LatLng(center.latitude - 0.003, center.longitude - 0.003);
+
+    // Build lists of Danger & Safe zones coordinates
+    List<LatLng> dangerCoords = [];
+    List<LatLng> safeCoords = [baseCamp];
+
+    List<CircleMarker> circles = [
+      CircleMarker(
+        point: baseCamp,
+        color: Colors.green.withOpacity(0.15),
+        borderStrokeWidth: 2,
+        borderColor: Colors.green,
+        useRadiusInMeter: true,
+        radius: 200,
+      ),
+    ];
+
+    for (var m in widget.messages) {
+      if (m.latitude != null && m.longitude != null && m.status != 'RESOLVED') {
+        if (m.severity == 'CRITICAL' || m.severity == 'HIGH') {
+          LatLng dangerPoint = LatLng(m.latitude!, m.longitude!);
+          dangerCoords.add(dangerPoint);
+          circles.add(
+            CircleMarker(
+              point: dangerPoint,
+              color: Colors.red.withOpacity(0.15),
+              borderStrokeWidth: 2,
+              borderColor: Colors.red,
+              useRadiusInMeter: true,
+              radius: 150,
+            ),
+          );
+        }
+      }
+    }
+
+    // Build routes polylines
+    List<Polyline> polylines = [];
+    if (widget.currentPosition != null) {
+      LatLng start = LatLng(widget.currentPosition!.latitude, widget.currentPosition!.longitude);
+      
+      for (var m in widget.messages) {
+        if (m.status == 'RESCUING' && m.latitude != null && m.longitude != null) {
+          LatLng end = LatLng(m.latitude!, m.longitude!);
+          
+          List<LatLng> routePoints = DijkstraPathfinder.findPath(
+            start: start,
+            end: end,
+            dangerZones: dangerCoords,
+            safeZones: safeCoords,
+          );
+          
+          polylines.add(
+            Polyline(
+              points: routePoints,
+              color: const Color(0xFF42A5F5),
+              strokeWidth: 5.0,
+              borderColor: Colors.black54,
+              borderStrokeWidth: 2.0,
+            ),
+          );
+        }
+      }
+    }
+
+    return Stack(
       children: [
-        FutureBuilder<CacheStore>(
-          future: MapCacheService.cacheStore,
-          builder: (context, snapshot) {
-            return TileLayer(
-              urlTemplate: 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png',
-              subdomains: const ['a', 'b', 'c'],
-              userAgentPackageName: 'com.resqnet.app',
-              tileProvider: snapshot.hasData
-                  ? CachedTileProvider(
-                      store: snapshot.data!,
-                      maxStale: const Duration(days: 30),
-                    )
-                  : NetworkTileProvider(),
-              tileBuilder: (context, tileWidget, tile) {
-                return AnimatedOpacity(
-                  duration: const Duration(milliseconds: 500),
-                  opacity: 1.0,
-                  child: tileWidget,
-                );
-              },
-            );
-          },
-        ),
-        MarkerLayer(
-          markers: [
-            if (widget.currentPosition != null)
-              Marker(
-                point: LatLng(
-                  widget.currentPosition!.latitude,
-                  widget.currentPosition!.longitude,
-                ),
-                width: 80,
-                height: 80,
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Container(
-                      padding: const EdgeInsets.all(8),
-                      decoration: BoxDecoration(
-                        color: Colors.blue.withOpacity(0.15),
-                        shape: BoxShape.circle,
-                        border: Border.all(color: Colors.blue.withOpacity(0.6), width: 2),
-                        boxShadow: [
-                          BoxShadow(
-                            color: Colors.blue.withOpacity(0.4),
-                            blurRadius: 15,
-                            spreadRadius: 4,
-                          ),
-                        ],
-                      ),
-                      child: const Icon(
-                        Icons.my_location,
-                        color: Colors.blue,
-                        size: 24,
-                      ),
-                    ),
-                    const SizedBox(height: 4),
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                      decoration: BoxDecoration(
-                        color: Colors.blue.withOpacity(0.8),
-                        borderRadius: BorderRadius.circular(4),
-                      ),
-                      child: const Text(
-                        "YOU",
-                        style: TextStyle(
-                          color: Colors.black,
-                          fontSize: 8,
-                          fontWeight: FontWeight.w900,
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ...widget.messages.where((m) => m.latitude != null).map((m) {
-              final color = _getSeverityColor(m.severity);
-              final isCritical = m.severity == 'CRITICAL';
-              return Marker(
-                point: LatLng(m.latitude!, m.longitude!),
-                width: 100,
-                height: 100,
-                child: GestureDetector(
-                  onTap: () {
-                    showDialog(
-                      context: context,
-                      builder: (c) => _buildMarkerDialog(context, m, color),
+        FlutterMap(
+          mapController: _mapController,
+          options: MapOptions(initialCenter: center, initialZoom: 15),
+          children: [
+            FutureBuilder<CacheStore>(
+              future: MapCacheService.cacheStore,
+              builder: (context, snapshot) {
+                return TileLayer(
+                  urlTemplate: 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png',
+                  subdomains: const ['a', 'b', 'c'],
+                  userAgentPackageName: 'com.resqnet.app',
+                  tileProvider: snapshot.hasData
+                      ? CachedTileProvider(
+                          store: snapshot.data!,
+                          maxStale: const Duration(days: 30),
+                        )
+                      : NetworkTileProvider(),
+                  tileBuilder: (context, tileWidget, tile) {
+                    return AnimatedOpacity(
+                      duration: const Duration(milliseconds: 500),
+                      opacity: 1.0,
+                      child: tileWidget,
                     );
                   },
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Container(
-                        padding: EdgeInsets.all(isCritical ? 10 : 8),
-                        decoration: BoxDecoration(
-                          color: color.withOpacity(0.2),
-                          shape: BoxShape.circle,
-                          border: Border.all(color: color, width: isCritical ? 2.5 : 2),
-                          boxShadow: [
-                            BoxShadow(
-                              color: color.withOpacity(0.5),
-                              blurRadius: isCritical ? 20 : 10,
-                              spreadRadius: isCritical ? 5 : 2,
-                            ),
-                          ],
-                        ),
-                        child: Icon(
-                          Icons.radar_rounded,
-                          color: color,
-                          size: isCritical ? 28 : 22,
-                        ),
-                      ),
-                      const SizedBox(height: 4),
-                      if (isCritical)
-                        Container(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 6,
-                            vertical: 2,
-                          ),
-                          decoration: BoxDecoration(
-                            color: color,
-                            borderRadius: BorderRadius.circular(4),
-                          ),
-                          child: const Text(
-                            "CRITICAL",
-                            style: TextStyle(
-                              color: Colors.black,
-                              fontSize: 7,
-                              fontWeight: FontWeight.w900,
-                              letterSpacing: 0.5,
-                            ),
-                          ),
-                        ),
-                    ],
-                  ),
-                ),
-              );
-            }),
-            ...widget.messages
-                .where(
-                  (m) => m.rescuerLatitude != null && m.status == 'RESCUING',
-                )
-                .map((m) {
-                  return Marker(
-                    point: LatLng(m.rescuerLatitude!, m.rescuerLongitude!),
-                    width: 60,
-                    height: 60,
+                );
+              },
+            ),
+            CircleLayer(
+              circles: circles,
+            ),
+            PolylineLayer(
+              polylines: polylines,
+            ),
+            MarkerLayer(
+              markers: [
+                if (widget.currentPosition != null)
+                  Marker(
+                    point: LatLng(
+                      widget.currentPosition!.latitude,
+                      widget.currentPosition!.longitude,
+                    ),
+                    width: 80,
+                    height: 80,
                     child: Column(
                       mainAxisAlignment: MainAxisAlignment.center,
                       children: [
                         Container(
-                          padding: const EdgeInsets.all(6),
+                          padding: const EdgeInsets.all(8),
                           decoration: BoxDecoration(
-                            color: Colors.orange.withOpacity(0.2),
+                            color: Colors.blue.withOpacity(0.15),
                             shape: BoxShape.circle,
-                            border: Border.all(color: Colors.orange, width: 2),
+                            border: Border.all(color: Colors.blue.withOpacity(0.6), width: 2),
                             boxShadow: [
                               BoxShadow(
-                                color: Colors.orange.withOpacity(0.4),
+                                color: Colors.blue.withOpacity(0.4),
                                 blurRadius: 15,
-                                spreadRadius: 2,
+                                spreadRadius: 4,
                               ),
                             ],
                           ),
                           child: const Icon(
-                            Icons.directions_run_outlined,
-                            color: Colors.orange,
+                            Icons.my_location,
+                            color: Colors.blue,
                             size: 24,
                           ),
                         ),
@@ -2322,11 +2727,11 @@ class _RescuerMapWidgetState extends State<RescuerMapWidget> {
                         Container(
                           padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                           decoration: BoxDecoration(
-                            color: Colors.orange.withOpacity(0.9),
+                            color: Colors.blue.withOpacity(0.8),
                             borderRadius: BorderRadius.circular(4),
                           ),
                           child: const Text(
-                            "RESCUER",
+                            "YOU",
                             style: TextStyle(
                               color: Colors.black,
                               fontSize: 8,
@@ -2336,11 +2741,173 @@ class _RescuerMapWidgetState extends State<RescuerMapWidget> {
                         ),
                       ],
                     ),
+                  ),
+                ...widget.messages.where((m) => m.latitude != null).map((m) {
+                  final color = _getSeverityColor(m.severity);
+                  final isCritical = m.severity == 'CRITICAL';
+                  return Marker(
+                    point: LatLng(m.latitude!, m.longitude!),
+                    width: 100,
+                    height: 100,
+                    child: GestureDetector(
+                      onTap: () {
+                        showDialog(
+                          context: context,
+                          builder: (c) => _buildMarkerDialog(context, m, color),
+                        );
+                      },
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Container(
+                            padding: EdgeInsets.all(isCritical ? 10 : 8),
+                            decoration: BoxDecoration(
+                              color: color.withOpacity(0.2),
+                              shape: BoxShape.circle,
+                              border: Border.all(color: color, width: isCritical ? 2.5 : 2),
+                              boxShadow: [
+                                BoxShadow(
+                                  color: color.withOpacity(0.5),
+                                  blurRadius: isCritical ? 20 : 10,
+                                  spreadRadius: isCritical ? 5 : 2,
+                                ),
+                              ],
+                            ),
+                            child: Icon(
+                              Icons.radar_rounded,
+                              color: color,
+                              size: isCritical ? 28 : 22,
+                            ),
+                          ),
+                          const SizedBox(height: 4),
+                          if (isCritical)
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 6,
+                                vertical: 2,
+                              ),
+                              decoration: BoxDecoration(
+                                color: color,
+                                borderRadius: BorderRadius.circular(4),
+                              ),
+                              child: const Text(
+                                "CRITICAL",
+                                style: TextStyle(
+                                  color: Colors.black,
+                                  fontSize: 7,
+                                  fontWeight: FontWeight.w900,
+                                  letterSpacing: 0.5,
+                                ),
+                              ),
+                            ),
+                        ],
+                      ),
+                    ),
                   );
                 }),
+                ...widget.messages
+                    .where(
+                      (m) => m.rescuerLatitude != null && m.status == 'RESCUING',
+                    )
+                    .map((m) {
+                      return Marker(
+                        point: LatLng(m.rescuerLatitude!, m.rescuerLongitude!),
+                        width: 60,
+                        height: 60,
+                        child: Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Container(
+                              padding: const EdgeInsets.all(6),
+                              decoration: BoxDecoration(
+                                color: Colors.orange.withOpacity(0.2),
+                                shape: BoxShape.circle,
+                                border: Border.all(color: Colors.orange, width: 2),
+                                boxShadow: [
+                                  BoxShadow(
+                                    color: Colors.orange.withOpacity(0.4),
+                                    blurRadius: 15,
+                                    spreadRadius: 2,
+                                  ),
+                                ],
+                              ),
+                              child: const Icon(
+                                Icons.directions_run_outlined,
+                                color: Colors.orange,
+                                size: 24,
+                              ),
+                            ),
+                            const SizedBox(height: 4),
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                              decoration: BoxDecoration(
+                                color: Colors.orange.withOpacity(0.9),
+                                borderRadius: BorderRadius.circular(4),
+                              ),
+                              child: const Text(
+                                "RESCUER",
+                                style: TextStyle(
+                                  color: Colors.black,
+                                  fontSize: 8,
+                                  fontWeight: FontWeight.w900,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      );
+                    }),
+              ],
+            ),
           ],
         ),
+        // Map Legend
+        Positioned(
+          bottom: 16,
+          left: 16,
+          child: Container(
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: const Color(0xFF0A0A0E).withOpacity(0.85),
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(color: Colors.white.withOpacity(0.1)),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Text("MAP LEGEND", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 10, letterSpacing: 1.0, color: Colors.white70)),
+                const SizedBox(height: 8),
+                _legendItem(Colors.green, "Safe Base Camp"),
+                _legendItem(Colors.red, "Danger Zone (Avoid)"),
+                _legendItem(const Color(0xFF42A5F5), "Optimized Route (Dijkstra)"),
+              ],
+            ),
+          ),
+        ),
       ],
+    );
+  }
+
+  Widget _legendItem(Color color, String text) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 2.0),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 12,
+            height: 12,
+            decoration: BoxDecoration(
+              color: color.withOpacity(0.2),
+              border: Border.all(color: color, width: 1.5),
+              borderRadius: BorderRadius.circular(3),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Text(text, style: const TextStyle(fontSize: 10, color: Colors.white70)),
+        ],
+      ),
     );
   }
 

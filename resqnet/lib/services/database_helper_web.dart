@@ -35,6 +35,11 @@ class DatabaseHelper {
         longitude: msg.longitude,
         rescuerLatitude: msg.rescuerLatitude,
         rescuerLongitude: msg.rescuerLongitude,
+        disasterType: msg.disasterType,
+        injurySeverity: msg.injurySeverity,
+        priorityScore: msg.priorityScore,
+        priorityExplanation: msg.priorityExplanation,
+        confidenceScore: msg.confidenceScore,
       );
     }
   }
