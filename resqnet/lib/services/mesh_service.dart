@@ -519,9 +519,40 @@ class MeshService {
 
   Future<void> _syncWithSimulator() async {
     try {
+      // 1. PUSH local messages and chats to the simulator
+      final localMsgs = await dbHelper.getMessages();
+      for (var msg in localMsgs) {
+        final payload = msg.toMap();
+        payload['message_id'] = msg.messageId;
+        try {
+          await http.post(
+            Uri.parse("$_simulatorBaseUrl/broadcast"),
+            headers: {"Content-Type": "application/json"},
+            body: jsonEncode(payload),
+          ).timeout(const Duration(seconds: 2));
+        } catch (_) {}
+      }
+
+      for (var msg in localMsgs) {
+        final localChats = await dbHelper.getChatMessages(msg.messageId, nodeId);
+        for (var chat in localChats) {
+          final payload = chat.toMap();
+          payload['message_id'] = chat.messageId;
+          try {
+            await http.post(
+              Uri.parse("$_simulatorBaseUrl/broadcast"),
+              headers: {"Content-Type": "application/json"},
+              body: jsonEncode(payload),
+            ).timeout(const Duration(seconds: 2));
+          } catch (_) {}
+        }
+      }
+
+      // 2. PULL messages from the simulator
       final response = await http.get(
         Uri.parse("$_simulatorBaseUrl/sync?node_id=$nodeId"),
-      );
+      ).timeout(const Duration(seconds: 3));
+
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
         final List<dynamic> msgs = data['messages'] ?? [];
@@ -553,7 +584,8 @@ class MeshService {
               
               if (localMsg.status != msg.status || 
                   localMsg.rescuerLatitude != msg.rescuerLatitude ||
-                  localMsg.rescuerLongitude != msg.rescuerLongitude) {
+                  localMsg.rescuerLongitude != msg.rescuerLongitude ||
+                  localMsg.priorityScore != msg.priorityScore) {
                 await dbHelper.insertMessage(msg);
                 if (onMessageReceived != null) onMessageReceived!(msg);
               }
